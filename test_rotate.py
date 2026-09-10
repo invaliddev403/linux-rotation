@@ -3,12 +3,64 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import rotate
 
 
 class RotationTests(unittest.TestCase):
+    def test_login_changes_only_selected_output(self):
+        data = [{'name': 'outputs', 'data': [
+            {'connectorName': 'DSI-1', 'transform': 'Normal', 'autoRotation': 'Always', 'scale': 1.45},
+            {'connectorName': 'HDMI-1', 'transform': 'Normal'}]}, {'name': 'setups', 'data': []}]
+        result = rotate.login_config(data, 'DSI-1', 270)
+        self.assertEqual(result[0]['data'][0], {'connectorName': 'DSI-1', 'transform': 'Rotated270',
+                                               'autoRotation': 'Never', 'scale': 1.45})
+        self.assertEqual(result[0]['data'][1], {'connectorName': 'HDMI-1', 'transform': 'Normal'})
+        with self.assertRaises(RuntimeError):
+            rotate.login_config(data, 'missing', 90)
+
+    def test_login_backup_repeat_and_undo(self):
+        for existed in (True, False):
+            with self.subTest(existed=existed), tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                target = root / '.config/kwinoutputconfig.json'
+                target.parent.mkdir()
+                original = '[{"name":"outputs","data":[{"connectorName":"DSI-1","transform":"Normal"}]}]\n'
+                source = root / 'source.json'
+                source.write_text(original)
+                if existed:
+                    target.write_text(original)
+                account = SimpleNamespace(pw_dir=d, pw_uid=os.getuid(), pw_gid=os.getgid())
+                args = SimpleNamespace(command='login-enable', output='DSI-1', rotation=270, source=str(source))
+                with patch.object(rotate, 'LOGIN_STATE', root / 'state/backup.json'), \
+                     patch.object(rotate, 'login_target', return_value=(target, account)), \
+                     patch.object(rotate.os, 'chown'):
+                    rotate.login_action(args)
+                    first = rotate.LOGIN_STATE.read_text()
+                    args.rotation = 90
+                    rotate.login_action(args)
+                    self.assertEqual(rotate.LOGIN_STATE.read_text(), first)
+                    args.command = 'login-undo'
+                    rotate.login_action(args)
+                    self.assertEqual(target.exists(), existed)
+                    if existed:
+                        self.assertEqual(target.read_text(), original)
+                    self.assertFalse(rotate.LOGIN_STATE.exists())
+
+    def test_login_rejects_symlink_and_other_manager(self):
+        with patch.object(rotate.Path, 'resolve', return_value=Path('/usr/lib/systemd/system/gdm.service')):
+            with self.assertRaisesRegex(RuntimeError, 'supports Plasma Login Manager only'):
+                rotate.login_target()
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / 'kwinoutputconfig.json'
+            target.symlink_to(Path(d) / 'somewhere')
+            account = SimpleNamespace(pw_dir=d)
+            with patch.object(rotate, 'login_target', return_value=(target, account)):
+                with self.assertRaisesRegex(RuntimeError, 'Refusing symlink'):
+                    rotate.login_action(SimpleNamespace(command='login-status'))
+
     def test_session_detection_never_uses_xrandr_on_wayland(self):
         for desktop, session, expected in [('XFCE', 'x11', 'x11'), ('COSMIC', 'wayland', 'cosmic'),
                                            ('KDE', 'wayland', 'kde'), ('GNOME', 'wayland', 'gnome'),

@@ -11,6 +11,10 @@ import shutil
 import signal
 import subprocess
 import sys
+import pwd
+import tempfile
+
+LOGIN_STATE = Path('/var/lib/linux-rotation/plasmalogin-backup.json')
 
 SCHEMA = 'org.gnome.settings-daemon.peripherals.touchscreen'
 ANGLES = {'normal': 0, 'left-up': 90, 'bottom-up': 180, 'right-up': 270}
@@ -287,16 +291,121 @@ def watch(b, args):
                     run('xinput', 'set-prop', args.touch, 'Coordinate Transformation Matrix', *original_touch)
 
 
+def login_target():
+    manager = Path('/etc/systemd/system/display-manager.service').resolve().name
+    if manager != 'plasmalogin.service':
+        raise RuntimeError(f'Login-screen automation supports Plasma Login Manager only; detected {manager}. '
+                           'SDDM, GDM, LightDM and COSMIC greeters need their own configuration.')
+    account = pwd.getpwnam('plasmalogin')
+    return Path(account.pw_dir) / '.config/kwinoutputconfig.json', account
+
+
+def login_config(data, name, rotation):
+    matches = [o for group in data if group.get('name') == 'outputs'
+               for o in group['data'] if o.get('connectorName') == name]
+    if not matches:
+        raise RuntimeError(f'No {name} entry in greeter configuration; no changes made.')
+    for output in matches:
+        output['transform'] = {0: 'Normal', 90: 'Rotated90', 180: 'Rotated180', 270: 'Rotated270'}[rotation]
+        output['autoRotation'] = 'Never'
+    return data
+
+
+def atomic_file(path, content, uid, gid, mode):
+    fd, temporary = tempfile.mkstemp(prefix='.linux-rotation-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chown(temporary, uid, gid)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def login_action(args):
+    target, account = login_target()
+    # Do not follow greeter-controlled symlinks while running with root privileges.
+    for path in (target, target.parent, Path(account.pw_dir), LOGIN_STATE, LOGIN_STATE.parent):
+        if path.is_symlink():
+            raise RuntimeError(f'Refusing symlink: {path}')
+    if args.command == 'login-status':
+        print('Manager: Plasma Login Manager\nConfiguration:', target)
+        if target.exists():
+            data = json.loads(target.read_text())
+            print(json.dumps([o for g in data if g.get('name') == 'outputs' for o in g['data']], indent=2))
+        else:
+            print('No greeter display configuration yet.')
+        print('Undo backup:', LOGIN_STATE if LOGIN_STATE.exists() else 'none')
+        return
+    if args.command == 'login-undo':
+        if not LOGIN_STATE.exists():
+            raise RuntimeError('No login-screen backup created by this script.')
+        backup = json.loads(LOGIN_STATE.read_text())
+        if backup['target'] != str(target):
+            raise RuntimeError('Backup target differs from current login-manager home.')
+        if backup['existed']:
+            atomic_file(target, backup['content'], backup['uid'], backup['gid'], backup['mode'])
+        else:
+            target.unlink(missing_ok=True)
+        LOGIN_STATE.unlink()
+        print('Previous greeter configuration restored. Takes effect when the greeter next starts.')
+        return
+    if args.rotation is None or not args.output:
+        raise RuntimeError('login-enable requires --output and --rotation (absolute angle, not offset).')
+    existed = target.exists()
+    if not existed and not args.source:
+        raise RuntimeError('No greeter configuration. Supply --source /absolute/path/to/kwinoutputconfig.json from a working KDE session.')
+    source = target if existed else Path(args.source)
+    if not source.is_absolute():
+        raise RuntimeError('--source must be an absolute path.')
+    original = source.read_text()
+    data = login_config(json.loads(original), args.output, args.rotation)
+    if LOGIN_STATE.exists():
+        if json.loads(LOGIN_STATE.read_text())['target'] != str(target):
+            raise RuntimeError('Existing backup belongs to another target; undo it first.')
+    else:
+        LOGIN_STATE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chown(LOGIN_STATE.parent, 0, 0)
+        os.chmod(LOGIN_STATE.parent, 0o700)
+        metadata = target.stat() if existed else None
+        backup = {'target': str(target), 'existed': existed, 'content': original if existed else None,
+                  'uid': metadata.st_uid if existed else None, 'gid': metadata.st_gid if existed else None,
+                  'mode': metadata.st_mode & 0o777 if existed else None}
+        atomic_file(LOGIN_STATE, json.dumps(backup), 0, 0, 0o600)
+    if not target.parent.exists():
+        target.parent.mkdir(mode=0o700)
+        os.chown(target.parent, account.pw_uid, account.pw_gid)
+    atomic_file(target, json.dumps(data, indent=4) + '\n', account.pw_uid, account.pw_gid, 0o600)
+    if json.loads(target.read_text()) != data:
+        raise RuntimeError('Greeter configuration verification failed; use login-undo.')
+    print(f'Verified {args.output}: fixed {args.rotation} degrees. Backup: {LOGIN_STATE}')
+    print('Effective when the greeter next starts. No restart or logout was performed.')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['status', 'deps', 'enable', 'undo', 'watch'])
+    parser.add_argument('command', choices=['status', 'deps', 'enable', 'undo', 'watch',
+                                          'login-status', 'login-enable', 'login-undo'])
     parser.add_argument('--output', help='Built-in output, e.g. DSI-1 or eDP-1')
     parser.add_argument('--offset', type=int, choices=[0,90,180,270], default=0,
                         help='Additional panel-relative rotation for watch only (default: 0)')
     parser.add_argument('--touch', help='X11 touchscreen name or ID; watch only')
+    parser.add_argument('--rotation', type=int, choices=[0,90,180,270], help='Absolute login-screen rotation; login-enable only')
+    parser.add_argument('--source', help='Working KDE output JSON to seed a missing greeter config; login-enable only')
     args = parser.parse_args()
     if args.command != 'watch' and (args.offset or args.touch):
         parser.error('--offset and --touch apply only to watch')
+    if args.command != 'login-enable' and (args.rotation is not None or args.source):
+        parser.error('--rotation and --source apply only to login-enable')
+    if args.command.startswith('login-'):
+        if os.geteuid() != 0:
+            parser.error('Login-screen commands require sudo; see README. Desktop commands run as your regular user.')
+        login_action(args)
+        return
     if os.geteuid() == 0:
         parser.error('Run as your desktop user, not sudo/root. deps invokes sudo only where needed.')
     if args.command == 'deps':
