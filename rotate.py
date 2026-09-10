@@ -13,6 +13,7 @@ import subprocess
 import sys
 import pwd
 import tempfile
+import time
 
 LOGIN_STATE = Path('/var/lib/linux-rotation/plasmalogin-backup.json')
 
@@ -390,7 +391,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=['status', 'deps', 'enable', 'undo', 'watch',
                                           'login-status', 'login-enable', 'login-undo',
-                                          'boot-status', 'boot-enable', 'boot-undo'])
+                                          'boot-status', 'boot-enable', 'boot-undo',
+                                          'install-system', 'uninstall-system', 'session-enable'])
     parser.add_argument('--output', help='Built-in output, e.g. DSI-1 or eDP-1')
     parser.add_argument('--offset', type=int, choices=[0,90,180,270], default=0,
                         help='Additional panel-relative rotation for watch only (default: 0)')
@@ -410,6 +412,12 @@ def main():
     if args.command != 'boot-enable' and (args.menu_rotation is not None or args.panel_orientation is not None
                                          or args.console_rotation is not None or args.dry_run):
         parser.error('Boot rotation options apply only to boot-enable')
+    if args.command in ('install-system', 'uninstall-system'):
+        if os.geteuid() != 0:
+            parser.error('System installation commands require sudo.')
+        import system_install
+        system_install.action(args.command)
+        return
     if args.command.startswith('boot-'):
         if os.geteuid() != 0:
             parser.error('Boot commands require sudo; see README.')
@@ -426,6 +434,9 @@ def main():
     if args.command == 'deps':
         dependencies()
         return
+    if args.command == 'session-enable':
+        session_enable()
+        return
     b = backend()
     print('Desktop:', os.environ.get('XDG_CURRENT_DESKTOP'), '| backend:', b)
     if args.command == 'status':
@@ -441,6 +452,37 @@ def main():
         undo(b)
     else:
         watch(b, args)
+
+
+def session_enable():
+    """One-time native setup in each user's own session; never touch other homes."""
+    b = backend()
+    if b not in ('kde', 'gnome'):
+        print('Automatic all-user setup supports KDE/GNOME Wayland only; use watch manually here.')
+        return
+    marker = STATE / ('system-setup-' + b + '.done')
+    if marker.exists():
+        print('Initial rotation setup already completed; preserving user preference.')
+        return
+    STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (STATE / 'session-setup.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        if marker.exists():
+            return
+        # The compositor and D-Bus sensor service may still be starting at login.
+        for attempt in range(6):
+            try:
+                sensor_check()
+                native(b, None)
+                marker.write_text('Native rotation initialized. Later preferences are preserved.\n')
+                return
+            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
+                if attempt == 5:
+                    raise
+                time.sleep(2)
 
 
 if __name__ == '__main__':

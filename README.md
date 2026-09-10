@@ -16,7 +16,44 @@ python3 rotate.py enable
 
 `deps` supports Debian/Ubuntu derivatives, Arch/CachyOS/Manjaro, Fedora/RHEL derivatives with DNF, and openSUSE with Zypper. It installs `iio-sensor-proxy` if `monitor-sensor` is absent, then starts the sensor service on systemd systems. Package-manager prompts remain interactive. It does not refresh repositories or upgrade the OS. On Arch, update your system normally before installing if your repository database is stale. Immutable Fedora requires its own package layering workflow if the package is missing. Non-systemd systems need the distribution's service/D-Bus activation setup.
 
-Python 3.8 or later must already be installed (package `python3` on Debian/Fedora/openSUSE, `python` on Arch). The script uses only Python's standard library. Keep `rotate.py` and `boot_rotation.py` together when copying the helper to another machine.
+Python 3.8 or later must already be installed (package `python3` on Debian/Fedora/openSUSE, `python` on Arch). The script uses only Python's standard library. Keep `rotate.py`, `boot_rotation.py`, and `system_install.py` together when copying the helper to another machine.
+
+## Install for all existing and future users
+
+Boot and login-screen fixes already apply system-wide. Native desktop rotation is a per-user preference. Install the helper and a system-wide XDG autostart task with:
+
+```bash
+sudo python3 rotate.py install-system
+```
+
+This installs root-owned code under `/usr/local/lib/linux-rotation`, the `linux-rotation` command under `/usr/local/bin`, and `/etc/xdg/autostart/linux-rotation.desktop`. It does not depend on the original checkout staying in a user's home directory. Run the install command again from an updated checkout to update the system copy. Existing files must match the install manifest; unrelated or locally edited files are not overwritten.
+
+Every existing or newly created **KDE/GNOME Wayland** user gets native rotation enabled at their next graphical login. It runs as that user and backs up their prior setting, rather than editing other users' home directories as root. After successful setup, a per-backend marker under `~/.local/state/linux-rotation/` prevents subsequent logins from overriding the user's later preference. Failed setup retries briefly at login and is retried at the next login; no success marker is written on failure. A working sensor service and desktop display utility are still required; install sensor support with `deps` first if needed.
+
+For a currently logged-in user, apply immediately from their own desktop terminal:
+
+```bash
+linux-rotation session-enable
+```
+
+This does not force logout or restart any other session. Existing users who are already logged in can run the same command or wait until their next login. System/service users and the greeter do not receive a separate desktop configuration. On X11, COSMIC, Sway and other desktops, the installed command is available, but this autostart task does not launch a watcher; use the documented `watch` setup after testing that session's output/touch mapping. Users with an existing personal autostart override or customized XDG search paths may need to enable the task explicitly.
+
+To opt out after initialization, run `linux-rotation undo` as the user or change the native display setting; the completion marker preserves that choice. To opt out before initialization, place a file named `linux-rotation.desktop` in `~/.config/autostart/` containing:
+
+```ini
+[Desktop Entry]
+Type=Application
+Name=Disable rotation initialization
+Hidden=true
+```
+
+To remove the shared helper and autostart task:
+
+```bash
+sudo linux-rotation uninstall-system
+```
+
+Uninstall leaves per-user preferences, completion markers, backups, and existing boot/login fixes intact. Run the relevant `undo`, `boot-undo` or `login-undo` command before uninstalling if you also want those settings restored. It does not uninstall dependencies. This setup is a one-time default for each user, not an enforced policy.
 
 ## Boot menu, Linux console, and splash (Limine)
 
