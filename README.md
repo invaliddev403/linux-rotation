@@ -16,7 +16,48 @@ python3 rotate.py enable
 
 `deps` supports Debian/Ubuntu derivatives, Arch/CachyOS/Manjaro, Fedora/RHEL derivatives with DNF, and openSUSE with Zypper. It installs `iio-sensor-proxy` if `monitor-sensor` is absent, then starts the sensor service on systemd systems. Package-manager prompts remain interactive. It does not refresh repositories or upgrade the OS. On Arch, update your system normally before installing if your repository database is stale. Immutable Fedora requires its own package layering workflow if the package is missing. Non-systemd systems need the distribution's service/D-Bus activation setup.
 
-Python 3.8 or later must already be installed (package `python3` on Debian/Fedora/openSUSE, `python` on Arch). The script uses only Python's standard library.
+Python 3.8 or later must already be installed (package `python3` on Debian/Fedora/openSUSE, `python` on Arch). The script uses only Python's standard library. Keep `rotate.py` and `boot_rotation.py` together when copying the helper to another machine.
+
+## Boot menu, Linux console, and splash (Limine)
+
+Boot rotation is separate from desktop and login-screen rotation. The `boot-*` commands support **Limine with limine-entry-tool-style `/etc/default/limine`, explicit kernel command lines, and non-UKI `protocol: linux` entries**, as used on this CachyOS laptop. They do not support GRUB, systemd-boot, UKIs, Secure Boot/enrolled configurations, or arbitrary Limine setups. Secure Boot must be disabled for this helper; it refuses enabled or indeterminate states rather than bypassing configuration signing. Check that your installed Limine documents `interface_rotation` before using the menu option.
+
+For the MiniBook X N150, preview the change first:
+
+```bash
+sudo python3 rotate.py boot-status
+sudo python3 rotate.py boot-enable --output DSI-1 \
+  --menu-rotation 90 --panel-orientation right_side_up --console-rotation 1 --dry-run
+```
+
+Apply by removing `--dry-run`:
+
+```bash
+sudo python3 rotate.py boot-enable --output DSI-1 \
+  --menu-rotation 90 --panel-orientation right_side_up --console-rotation 1
+```
+
+All three rotation options and `--output` are required. The conventions differ:
+
+| Option | Purpose | MiniBook setting |
+|---|---|---|
+| `--menu-rotation` | Limine graphical interface rotation in degrees (clockwise renderer convention) | `90` |
+| `--panel-orientation` | Linux DRM panel mounting hint, used by supporting splash/compositor software | `right_side_up` |
+| `--console-rotation` | Linux framebuffer-console quarter-turns clockwise | `1` |
+
+These correspond to this laptop's working KDE `Rotated270` orientation; do not assume the same numeric angle across interfaces. They configure fixed startup orientation, not accelerometer-based boot rotation. The firmware CHUWI logo and BIOS setup cannot be changed by these Linux settings. Plymouth should honor the panel hint after the native DRM driver takes over; earlier simpledrm frames or themes may still need separate handling. The kernel must support framebuffer console rotation. The original machine has `CONFIG_FRAMEBUFFER_CONSOLE_ROTATION=y` and early KMS in its initramfs.
+
+The helper backs up and edits `/etc/default/limine` and `/boot/limine.conf` (override the latter with `--boot-config /absolute/path/limine.conf`). It preserves existing kernel/initramfs paths, hashes, root-device arguments, and unrelated options. Only Linux entries matching the running root device are changed; Btrfs `.snapshots` recovery entries and other OS roots are excluded. It refuses complex/combined video arguments rather than discarding their resolution or other settings. The defaults change carries kernel rotation into future generated entries; verify any separate drop-in or kernel-specific overrides on customized installations. The menu setting is in Limine's global header, which normal entry regeneration preserves; replacing the entire theme/config may remove it.
+
+No kernel/initramfs rebuilding is necessary for these external, non-UKI command-line changes. The helper does not reinstall Limine or run `limine-update`; it updates the current entries and their persistent defaults directly under the boot-partition lock. No reboot is performed automatically. Reboot when convenient and check the menu, splash, console, login screen, and desktop.
+
+Rollback:
+
+```bash
+sudo python3 rotate.py boot-undo
+```
+
+The first originals and latest applied texts are retained in `/var/lib/linux-rotation/boot-backup.json`. Repeated setup preserves the first originals. Undo restores both files if they still match the last applied texts. If a kernel update or other tool has changed them, undo refuses to overwrite newer entries: use the backup's original/applied texts to selectively remove the rotation options. This deliberately avoids restoring stale kernel paths after updates. Dry run does not write boot settings or a backup (it does acquire the normal boot-partition lock). There is no automated protection against power loss between the two file replacements.
 
 ## Login screen (Plasma Login Manager)
 
@@ -124,11 +165,13 @@ python3 rotate.py undo
 
 The first pre-change setting is preserved in `$XDG_STATE_HOME/linux-rotation/` (default `~/.local/state/linux-rotation/`). Repeated `enable` commands retain the original backup. Successful undo removes that backup. If automatic rotation was already enabled before running the script, undo appropriately leaves it enabled.
 
-For `watch`, stop the process; its initial display rotation and optional X11 touch matrix are restored. Undo does not uninstall packages or stop the shared sensor service. Only the explicit `login-*` commands touch login-screen configuration. No bootloader, kernel, udev, sensor mount matrix, or tablet-mode driver changes are made.
+For `watch`, stop the process; its initial display rotation and optional X11 touch matrix are restored. Undo does not uninstall packages or stop the shared sensor service. Only explicit `login-*` commands touch login-screen configuration, and only `boot-*` commands touch bootloader settings and kernel command lines. No udev, sensor mount matrix, or tablet-mode driver changes are made.
 
 ## Verification and limits
 
-Native KDE JSON detection and sensor status were checked on the owner's CachyOS KDE Wayland laptop. Automated tests use mocked CLI output for other backends and command construction. Debian/Ubuntu/Fedora installation, GNOME, XFCE/X11, COSMIC, Sway, and wlroots behavior have not been tested on live installations. Always test physical landscape, both portrait positions, upside-down orientation, and touchscreen alignment before adding startup automation.
+Native KDE JSON detection and sensor status were checked on the owner's CachyOS KDE Wayland laptop. The Limine boot command passed a live dry run, then applied and read back both installed kernel entries and persistent defaults successfully; visual verification after reboot is pending. The test suite contains 15 tests, including boot planning, preservation of recovery entries, repeated setup, and rollback that rejects later edits. Run it with `python3 -m unittest -v`.
+
+Automated desktop tests use mocked CLI output for other backends and command construction. Debian/Ubuntu/Fedora installation, GNOME, XFCE/X11, COSMIC, Sway, and wlroots behavior have not been tested on live installations. Always test physical landscape, both portrait positions, upside-down orientation, and touchscreen alignment before adding startup automation.
 
 No accelerometer in `status` means kernel/driver/service support needs attention first. This helper does not install out-of-tree drivers or implement keyboard disabling/tablet-mode detection. `status` makes no configuration changes, although connecting to the sensor service can cause normal D-Bus service activation.
 
@@ -141,3 +184,7 @@ No accelerometer in `status` means kernel/driver/service support needs attention
 - [wlr-randr source](https://github.com/emersion/wlr-randr/blob/master/main.c)
 - [X11 touchscreen transformation matrices](https://wiki.ubuntu.com/X/InputCoordinateTransformation)
 - [Plasma Login Manager](https://github.com/KDE/plasma-login-manager)
+- [Limine interface rotation](https://github.com/Limine-Bootloader/Limine/blob/v12.x/CONFIG.md)
+- [Framebuffer console rotation](https://www.kernel.org/doc/html/v5.9/fb/fbcon.html)
+- [CachyOS boot-manager configuration](https://wiki.cachyos.org/configuration/boot_manager_configuration/)
+- [Flanterm framebuffer rotation implementation](https://github.com/mintsuki/flanterm/blob/trunk/src/flanterm_backends/fb.c)

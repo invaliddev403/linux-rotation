@@ -389,18 +389,33 @@ def login_action(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=['status', 'deps', 'enable', 'undo', 'watch',
-                                          'login-status', 'login-enable', 'login-undo'])
+                                          'login-status', 'login-enable', 'login-undo',
+                                          'boot-status', 'boot-enable', 'boot-undo'])
     parser.add_argument('--output', help='Built-in output, e.g. DSI-1 or eDP-1')
     parser.add_argument('--offset', type=int, choices=[0,90,180,270], default=0,
                         help='Additional panel-relative rotation for watch only (default: 0)')
     parser.add_argument('--touch', help='X11 touchscreen name or ID; watch only')
     parser.add_argument('--rotation', type=int, choices=[0,90,180,270], help='Absolute login-screen rotation; login-enable only')
     parser.add_argument('--source', help='Working KDE output JSON to seed a missing greeter config; login-enable only')
+    parser.add_argument('--boot-config', default='/boot/limine.conf', help='Limine config path for boot commands')
+    parser.add_argument('--menu-rotation', type=int, choices=[0,90,180,270], help='Limine interface rotation; boot-enable only')
+    parser.add_argument('--panel-orientation', choices=['normal','left_side_up','right_side_up','upside_down'], help='DRM panel hint; boot-enable only')
+    parser.add_argument('--console-rotation', type=int, choices=[0,1,2,3], help='fbcon quarter-turns clockwise; boot-enable only')
+    parser.add_argument('--dry-run', action='store_true', help='Preview boot-enable without writing files')
     args = parser.parse_args()
     if args.command != 'watch' and (args.offset or args.touch):
         parser.error('--offset and --touch apply only to watch')
     if args.command != 'login-enable' and (args.rotation is not None or args.source):
         parser.error('--rotation and --source apply only to login-enable')
+    if args.command != 'boot-enable' and (args.menu_rotation is not None or args.panel_orientation is not None
+                                         or args.console_rotation is not None or args.dry_run):
+        parser.error('Boot rotation options apply only to boot-enable')
+    if args.command.startswith('boot-'):
+        if os.geteuid() != 0:
+            parser.error('Boot commands require sudo; see README.')
+        import boot_rotation
+        boot_rotation.action(args)
+        return
     if args.command.startswith('login-'):
         if os.geteuid() != 0:
             parser.error('Login-screen commands require sudo; see README. Desktop commands run as your regular user.')
